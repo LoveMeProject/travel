@@ -1,0 +1,13 @@
+{
+  "name": "우리 가족 여행",
+  "short_name": "가족여행",
+  "description": "가족과 함께 만드는 여행 계획·기록 앱",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f4f4f2",
+  "theme_color": "#185fa5",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
