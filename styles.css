@@ -69,7 +69,10 @@ input, textarea, select {
   font-family: inherit; font-size: 17px; color: var(--text);
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 12px; padding: 14px 14px; width: 100%; outline: none;
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; min-width: 0;
 }
+input[type="date"], input[type="time"] { display: block; text-align: left; }
+input[type="date"]::-webkit-date-and-time-value { text-align: left; }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 textarea { resize: vertical; min-height: 84px; }
 label.field-label { display: block; font-size: 15px; color: var(--text-2); margin: 18px 0 8px; font-weight: 600; }

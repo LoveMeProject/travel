@@ -12,10 +12,9 @@ function go(r) { route = { ...route, ...r }; render(); window.scrollTo(0, 0); }
 let _pushCache = {}; // id -> 마지막으로 클라우드에 올린 JSON
 function persist() { saveData(DATA); cloudSync(); }
 function cloudSync() {
+  // 변경된 여행만 클라우드에 올림. (자동 삭제는 하지 않음 — 삭제는 delTrip에서만)
   if (!window.SB) return;
-  const ids = new Set();
   DATA.trips.forEach(t => {
-    ids.add(t.id);
     const js = JSON.stringify(t);
     if (_pushCache[t.id] !== js) {
       _pushCache[t.id] = js;
@@ -23,12 +22,11 @@ function cloudSync() {
         .then(r => { if (r.error) console.error('upsert', r.error); });
     }
   });
-  Object.keys(_pushCache).forEach(id => {
-    if (!ids.has(id)) {
-      delete _pushCache[id];
-      SB.from('trips').delete().eq('id', id).then(r => { if (r.error) console.error('delete', r.error); });
-    }
-  });
+}
+function cloudDeleteTrip(id) {
+  if (!window.SB) return;
+  delete _pushCache[id];
+  SB.from('trips').delete().eq('id', id).then(r => { if (r.error) console.error('delete', r.error); });
 }
 function seedCache() { _pushCache = {}; DATA.trips.forEach(t => { _pushCache[t.id] = JSON.stringify(t); }); }
 
@@ -53,8 +51,13 @@ function openMap(q) { if (!q) return; window.open('https://www.google.com/maps/s
 function openUrl(u) { if (u) window.open(u, '_blank'); }
 function nearbyFood(name) { window.open('https://www.google.com/maps/search/' + encodeURIComponent('맛집 near ' + name), '_blank'); }
 
-const CAT = { food: { label: '맛집', emoji: '🍜' }, sight: { label: '관광', emoji: '📸' }, idea: { label: '아이디어', emoji: '💡' }, hotel: { label: '숙소', emoji: '🏨' } };
-const TYPE_EMOJI = { flight: '✈️', hotel: '🏨', food: '🍜', sight: '📸', activity: '🎯', memo: '📝' };
+const CAT = { food: { label: '맛집', emoji: '🍜' }, sight: { label: '관광', emoji: '📸' }, idea: { label: '아이디어', emoji: '💡' }, hotel: { label: '숙소', emoji: '🏨' }, move: { label: '이동', emoji: '🚗' }, shopping: { label: '쇼핑', emoji: '🛍️' } };
+const TYPE_EMOJI = { flight: '✈️', hotel: '🏨', food: '🍜', sight: '📸', activity: '🎯', memo: '📝', move: '🚗', shopping: '🛍️' };
+// 구글맵 place URL에서 이름 추출 (네이버 단축링크 등은 불가 → 빈 문자열)
+function nameFromMapUrl(url) {
+  try { const m = decodeURIComponent(url).match(/\/place\/([^\/@?]+)/); if (m) return m[1].replace(/\+/g, ' ').trim(); } catch (e) {}
+  return '';
+}
 
 // ================= RENDER =================
 function render() {
@@ -100,7 +103,7 @@ function tripCardHtml(t) {
   let rightTag = '';
   if (st === 'upcoming' && dd) rightTag = `<span class="badge">${dd}</span>`;
   else if (st === 'ongoing') rightTag = `<span class="badge">여행중</span>`;
-  else if (t.memories && t.memories.length) rightTag = `<span class="badge soft">📷 추억 ${t.memories.length}</span>`;
+  else if (st === 'past') rightTag = `<span class="badge gray">${dplus(t.end) || '지난 여행'}</span>`;
   let metaExtra = '';
   if (st === 'past') metaExtra = t.memories && t.memories.length ? ` · 구글포토 ${t.memories.length}` : (savedFood ? ` · 맛집 ${savedFood}곳` : '');
   return `
@@ -143,8 +146,8 @@ function tripChips(t) {
       <div class="dates">${fmtRange(t.start, t.end)} · ${t.members.map(m => memberLabel(m)).join('·')}</div>
     </div>
     <div class="chips">
-      <button class="chip filled" onclick="go({name:'flights',tripId:'${t.id}'})">항공${t.flights.length ? ' ' + t.flights.length : ''}</button>
-      <button class="chip filled" onclick="go({name:'hotels',tripId:'${t.id}'})">숙소${t.hotels.length ? ' ' + t.hotels.length : ''}</button>
+      <button class="chip ${t.flights.length ? 'filled' : ''}" onclick="go({name:'flights',tripId:'${t.id}'})">항공${t.flights.length ? ' ' + t.flights.length : ''}</button>
+      <button class="chip ${t.hotels.length ? 'filled' : ''}" onclick="go({name:'hotels',tripId:'${t.id}'})">숙소${t.hotels.length ? ' ' + t.hotels.length : ''}</button>
       <button class="chip" onclick="go({name:'checklist',tripId:'${t.id}'})">체크리스트</button>
       <button class="chip" onclick="alert('가계부는 다음 단계에서 추가됩니다')">가계부</button>
     </div>
@@ -170,10 +173,21 @@ function fabFor(t, tab) {
   return '';
 }
 
+// 해당 날짜(dateIso)에 뜨는 항공편 (출발 MM.DD 파싱해서 매칭)
+function flightsForDate(t, dateIso) {
+  const d = new Date(dateIso + 'T00:00:00'), mm = d.getMonth() + 1, dd = d.getDate();
+  return (t.flights || []).filter(f => { const m = (f.dep || '').match(/(\d{1,2})[.\/-](\d{1,2})/); return m && +m[1] === mm && +m[2] === dd; });
+}
+function flightTime(f) { const m = (f.dep || '').match(/(\d{1,2}:\d{2})/); return m ? m[1] : ''; }
+
 // ---- 일정(plan) ----
 function planView(t) {
   return t.days.map((d, di) => {
-    const items = d.items.slice().sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    // 일반 아이템 + 항공편(자동 이동 표시)을 시간순으로 합치기
+    const rows = [
+      ...d.items.map(it => ({ kind: 'item', time: it.time || '', it })),
+      ...flightsForDate(t, d.date).map(f => ({ kind: 'flight', time: flightTime(f), f })),
+    ].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
     return `
       <div class="day-block">
         <div class="day-head">
@@ -181,7 +195,7 @@ function planView(t) {
           <span class="ddate">${fmtDate(d.date)} / ${weekday(d.date)}</span>
           <span class="weather">${esc(d.weather || '')}</span>
         </div>
-        ${items.map((it, ii) => itemHtml(t, di, it, ii, items.length)).join('')}
+        ${rows.map(r => r.kind === 'item' ? itemHtml(t, di, r.it) : flightItemHtml(t, r.f)).join('')}
         <div class="day-actions">
           <button onclick="sheetItem('${t.id}', ${di})">＋ 장소 추가</button>
           <button onclick="sheetItem('${t.id}', ${di}, 'memo')">＋ 메모 추가</button>
@@ -189,6 +203,20 @@ function planView(t) {
       </div>
     `;
   }).join('');
+}
+
+// 항공편을 일정에 '이동' 카드로 표시 (탭하면 항공 편집)
+function flightItemHtml(t, f) {
+  return `
+    <div class="item" onclick="sheetFlight('${t.id}','${f.id}')">
+      <div class="time-col"><span class="time">${esc(flightTime(f))}</span><span class="dot accent"></span></div>
+      <div class="body accent">
+        <span class="type-emoji">✈️</span>
+        <div class="t-name">${esc(f.route)}<span class="t-tag">항공</span></div>
+        <div class="t-sub">${esc(f.airline || '')}${f.arr ? ' · ' + esc(f.dep) + ' → ' + esc(f.arr) : ''}</div>
+      </div>
+    </div>
+  `;
 }
 
 function itemHtml(t, di, it, ii, total) {
@@ -414,8 +442,7 @@ function renderHotels(t) {
           ${h.addr ? `<div class="c-meta">${esc(h.addr)}</div>` : ''}
           <div class="c-meta">체크인 ${esc(h.checkin || '-')} · 체크아웃 ${esc(h.checkout || '-')}</div>
           <div class="pill-row">
-            ${h.bookingUrl ? `<span class="pill" onclick="openUrl('${esc(h.bookingUrl)}')">예약 링크</span>` : ''}
-            <span class="pill" onclick="openMap('${esc(h.name)} ${esc(h.addr || '')}')">지도</span>
+            <span class="pill" onclick="${h.placeUrl ? `openUrl('${esc(h.placeUrl)}')` : `openMap('${esc(h.name)} ${esc(h.addr || '')}')`}">지도</span>
             <span class="pill" onclick="sheetHotel('${t.id}','${h.id}')">수정</span>
             <span class="pill" onclick="delHotel('${t.id}','${h.id}')">삭제</span>
           </div>
@@ -539,6 +566,7 @@ function saveTrip(tripId) {
 function delTrip(tripId) {
   if (!confirm('이 여행을 삭제할까요? 되돌릴 수 없어요.')) return;
   DATA.trips = DATA.trips.filter(x => x.id !== tripId);
+  cloudDeleteTrip(tripId); // 사용자가 직접 삭제할 때만 클라우드에서 제거
   persist(); closeSheet(); go({ name: 'home' });
 }
 
@@ -555,7 +583,7 @@ function sheetItem(tripId, di, kind, itemId) {
     <input id="ai-name" placeholder="${isMemo ? '예: 우산 챙기기' : '예: 시부야 스카이'}" value="${it ? esc(it.name) : ''}" />
     ${!isMemo ? `
     <label class="field-label">종류</label>
-    <select id="ai-type">${typeOpt('sight', '관광')}${typeOpt('food', '맛집')}${typeOpt('activity', '액티비티')}${typeOpt('hotel', '숙소')}</select>
+    <select id="ai-type">${typeOpt('sight', '관광')}${typeOpt('food', '맛집')}${typeOpt('move', '이동')}${typeOpt('shopping', '쇼핑')}${typeOpt('activity', '액티비티')}${typeOpt('hotel', '숙소')}</select>
     <label class="field-label">시간</label>
     <input id="ai-time" type="time" value="${it ? esc(it.time || '') : ''}" />
     <label class="field-label">메모 (선택)</label>
@@ -725,21 +753,26 @@ function sheetHotel(tripId, hid) {
     <input id="ho-name" placeholder="예: 시부야 엑셀 호텔" value="${h ? esc(h.name) : ''}" />
     <label class="field-label">주소</label>
     <input id="ho-addr" placeholder="예: 1-12-2 Dogenzaka, Shibuya" value="${h ? esc(h.addr || '') : ''}" />
-    <label class="field-label">체크인</label>
-    <input id="ho-in" placeholder="예: 09.24" value="${h ? esc(h.checkin || '') : ''}" />
-    <label class="field-label">체크아웃</label>
-    <input id="ho-out" placeholder="예: 09.27" value="${h ? esc(h.checkout || '') : ''}" />
-    <label class="field-label">예약 링크 (선택)</label>
-    <input id="ho-url" placeholder="https://..." value="${h ? esc(h.bookingUrl || '') : ''}" />
+    <label class="field-label">체크인 (예: 260924 → 2026.09.24)</label>
+    <input id="ho-in" inputmode="numeric" placeholder="260924" value="${h ? esc(h.checkin || '') : ''}" />
+    <label class="field-label">체크아웃 (예: 260927 → 2026.09.27)</label>
+    <input id="ho-out" inputmode="numeric" placeholder="260927" value="${h ? esc(h.checkout || '') : ''}" />
+    <label class="field-label">지도 링크 (네이버/구글맵 붙여넣기)</label>
+    <input id="ho-url" placeholder="지도 링크를 붙여넣으세요" value="${h ? esc(h.placeUrl || '') : ''}" />
+    <div class="c-meta" style="color:var(--text-3);margin-top:6px;">구글맵 링크는 이름이 자동으로 채워져요. 링크는 나중에 눌러서 지도로 바로 열 수 있어요.</div>
     <button class="btn-primary" onclick="saveHotel('${tripId}',${h ? `'${hid}'` : 'null'})">${h ? '저장' : '추가'}</button>
     <button class="btn-ghost" onclick="closeSheet()">취소</button>
   `);
 }
 function saveHotel(tripId, hid) {
-  const t = getTrip(tripId); const name = val('ho-name'); if (!name) { alert('숙소 이름을 입력해 주세요.'); return; }
-  const data = { name, addr: val('ho-addr'), checkin: val('ho-in'), checkout: val('ho-out'), bookingUrl: val('ho-url') };
+  const t = getTrip(tripId);
+  const placeUrl = val('ho-url');
+  let name = val('ho-name');
+  if (!name && placeUrl) name = nameFromMapUrl(placeUrl); // 구글맵 링크면 이름 자동
+  if (!name) { alert('숙소 이름을 입력하거나, 구글맵 링크를 붙여넣어 주세요.'); return; }
+  const data = { name, addr: val('ho-addr'), checkin: fmtYmd(val('ho-in')), checkout: fmtYmd(val('ho-out')), placeUrl };
   if (hid) Object.assign(t.hotels.find(x => x.id === hid), data);
-  else t.hotels.push({ id: uid(), mapUrl: '', ...data });
+  else t.hotels.push({ id: uid(), ...data });
   persist(); closeSheet(); render();
 }
 function delHotel(tripId, hid) { const t = getTrip(tripId); t.hotels = t.hotels.filter(x => x.id !== hid); persist(); render(); }
@@ -804,16 +837,27 @@ async function init() {
       if (data && data.length) {
         DATA = { trips: data.map(r => r.data) };
         seedCache();
-      } else if (!localStorage.getItem('ft_seeded')) {
-        // 클라우드가 비어있고 아직 한번도 안 심었으면 데모 데이터 업로드
-        DATA = JSON.parse(JSON.stringify(SEED));
-        for (const t of DATA.trips) {
-          _pushCache[t.id] = JSON.stringify(t);
-          await SB.from('trips').upsert({ id: t.id, data: t, updated_at: new Date().toISOString() });
-        }
       } else {
-        DATA = { trips: [] };
-        seedCache();
+        // 클라우드가 비어있음 — 이 기기에 저장된 캐시가 있으면 '복구'로 다시 올림
+        let cached = null;
+        try { const raw = localStorage.getItem(STORE_KEY); cached = raw ? JSON.parse(raw) : null; } catch (e) {}
+        if (cached && cached.trips && cached.trips.length) {
+          DATA = cached; _pushCache = {};
+          for (const t of DATA.trips) {
+            _pushCache[t.id] = JSON.stringify(t);
+            await SB.from('trips').upsert({ id: t.id, data: t, updated_at: new Date().toISOString() });
+          }
+        } else if (!localStorage.getItem('ft_seeded')) {
+          // 진짜 첫 실행 → 데모 데이터 업로드
+          DATA = JSON.parse(JSON.stringify(SEED));
+          for (const t of DATA.trips) {
+            _pushCache[t.id] = JSON.stringify(t);
+            await SB.from('trips').upsert({ id: t.id, data: t, updated_at: new Date().toISOString() });
+          }
+        } else {
+          DATA = { trips: [] };
+          seedCache();
+        }
       }
       localStorage.setItem('ft_seeded', '1');
       saveData(DATA);

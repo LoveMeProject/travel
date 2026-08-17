@@ -30,7 +30,6 @@ const SEED = {
         {
           date: '2026-09-24', weather: '흐림 24°',
           items: [
-            { id: 'i1', time: '18:30', type: 'flight', name: '서울 → 도쿄 (OZ102)', tag: '항공', sub: '예약번호 ABC123', by: 'dad', mapUrl: '' },
             { id: 'i2', time: '22:00', type: 'hotel', name: '시부야 호텔 체크인', tag: '숙소', sub: '', by: 'mom', mapUrl: 'https://maps.google.com/?q=Shibuya+Excel+Hotel+Tokyu' },
           ],
         },
@@ -43,9 +42,7 @@ const SEED = {
           ],
         },
         { date: '2026-09-26', weather: '구름 26°', items: [] },
-        { date: '2026-09-27', weather: '맑음 25°', items: [
-            { id: 'i6', time: '01:30', type: 'flight', name: '도쿄 → 서울 (OZ105)', tag: '항공', sub: '', by: 'dad', mapUrl: '' },
-        ] },
+        { date: '2026-09-27', weather: '맑음 25°', items: [] },
       ],
       // 저장함: 발견/검색한 장소
       saved: [
@@ -141,20 +138,34 @@ function nights(s, e) {
   const n = Math.round((de - ds) / 86400000);
   return `${n}박${n + 1}일`;
 }
+function todayMidnight() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 function dday(s) {
-  const today = new Date('2026-08-09T00:00:00');
+  const today = todayMidnight();
   const ds = new Date(s + 'T00:00:00');
   const diff = Math.round((ds - today) / 86400000);
   if (diff > 0) return `D-${diff}`;
   if (diff === 0) return 'D-DAY';
   return null;
 }
+function dplus(endIso) {
+  const today = todayMidnight();
+  const e = new Date(endIso + 'T00:00:00');
+  const diff = Math.round((today - e) / 86400000);
+  return diff >= 0 ? `D+${diff}` : null;
+}
 function tripStatus(t) {
-  const today = new Date('2026-08-09T00:00:00');
+  const today = todayMidnight();
   const s = new Date(t.start + 'T00:00:00'), e = new Date(t.end + 'T00:00:00');
   if (today < s) return 'upcoming';
   if (today > e) return 'past';
   return 'ongoing';
+}
+// YYMMDD / YYYYMMDD → YYYY.MM.DD (그 외는 그대로)
+function fmtYmd(input) {
+  const d = (input || '').replace(/\D/g, '');
+  if (d.length === 8) return `${d.slice(0, 4)}.${d.slice(4, 6)}.${d.slice(6, 8)}`;
+  if (d.length === 6) return `20${d.slice(0, 2)}.${d.slice(2, 4)}.${d.slice(4, 6)}`;
+  return input;
 }
 function weekday(iso) {
   const d = new Date(iso + 'T00:00:00');
