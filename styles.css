@@ -121,6 +121,9 @@ label.field-label { display: block; font-size: 15px; color: var(--text-2); margi
   padding: 18px 18px; margin-bottom: 12px;
 }
 .trip-card.upcoming { background: var(--accent-bg); border-color: transparent; }
+.trip-card.past { background: var(--surface-2); border-color: transparent; }
+.trip-card.past .name { color: var(--text-2); }
+.trip-card.past .meta { color: var(--text-3); }
 .trip-card .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .trip-card .name { font-size: 19px; font-weight: 600; }
 .trip-card.upcoming .name, .trip-card.upcoming .meta { color: var(--accent-text); }

@@ -18,8 +18,8 @@ const SEED = {
       members: ['mom', 'dad', 'son'],
       // 항공
       flights: [
-        { id: 'f1', route: '서울(ICN) → 도쿄(NRT)', airline: 'OZ 102', dep: '09.24 18:30', arr: '09.24 21:00', bookingUrl: '', code: 'ABC123' },
-        { id: 'f2', route: '도쿄(NRT) → 서울(ICN)', airline: 'OZ 105', dep: '09.27 01:30', arr: '09.27 04:10', bookingUrl: '', code: 'ABC123' },
+        { id: 'f1', route: '서울(ICN) → 도쿄(NRT)', airline: 'OZ 102', depDate: '2026.09.24', depTime: '18:30', arrDate: '2026.09.24', arrTime: '21:00', bookingUrl: '', code: 'ABC123' },
+        { id: 'f2', route: '도쿄(NRT) → 서울(ICN)', airline: 'OZ 105', depDate: '2026.09.27', depTime: '01:30', arrDate: '2026.09.27', arrTime: '04:10', bookingUrl: '', code: 'ABC123' },
       ],
       // 숙소
       hotels: [

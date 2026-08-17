@@ -10,6 +10,7 @@ function go(r) { route = { ...route, ...r }; render(); window.scrollTo(0, 0); }
 
 // ---- 저장 + 클라우드 동기화 ----
 let _pushCache = {}; // id -> 마지막으로 클라우드에 올린 JSON
+let _attachPhoto = null; // 메모 첨부 사진 임시보관
 function persist() { saveData(DATA); cloudSync(); }
 function cloudSync() {
   // 변경된 여행만 클라우드에 올림. (자동 삭제는 하지 않음 — 삭제는 delTrip에서만)
@@ -69,14 +70,18 @@ function render() {
   if (route.name === 'flights') return renderFlights(t);
   if (route.name === 'hotels') return renderHotels(t);
   if (route.name === 'checklist') return renderChecklist(t);
+  if (route.name === 'memos') return renderMemos(t);
 }
 
 // ---------------- HOME ----------------
 function renderHome() {
-  const tab = route.homeTab || 'upcoming';
-  const upcoming = DATA.trips.filter(t => tripStatus(t) !== 'past');
-  const past = DATA.trips.filter(t => tripStatus(t) === 'past');
-  const list = tab === 'upcoming' ? upcoming : past;
+  // 탭 없이 한 리스트: 진행중 → 예정(가까운 순) → 지난(최근 순)
+  const rank = { ongoing: 0, upcoming: 1, past: 2 };
+  const list = DATA.trips.slice().sort((a, b) => {
+    const sa = tripStatus(a), sb = tripStatus(b);
+    if (rank[sa] !== rank[sb]) return rank[sa] - rank[sb];
+    return sa === 'past' ? b.start.localeCompare(a.start) : a.start.localeCompare(b.start);
+  });
 
   app.innerHTML = `
     <div class="home-header">
@@ -86,12 +91,8 @@ function renderHome() {
       </div>
       <button class="fab-round" onclick="sheetNewTrip()">+</button>
     </div>
-    <div class="seg">
-      <button class="${tab === 'upcoming' ? 'on' : ''}" onclick="go({homeTab:'upcoming'})">예정 · 진행 여행</button>
-      <button class="${tab === 'past' ? 'on' : ''}" onclick="go({homeTab:'past'})">지난 여행</button>
-    </div>
-    <div class="page">
-      ${list.length ? list.map(tripCardHtml).join('') : `<div class="empty"><span class="ico">🧳</span>${tab === 'upcoming' ? '예정된 여행이 없어요.<br>+ 버튼으로 새 여행을 만들어 보세요.' : '지난 여행이 없어요.'}</div>`}
+    <div class="page" style="padding-top:14px;">
+      ${list.length ? list.map(tripCardHtml).join('') : `<div class="empty"><span class="ico">🧳</span>아직 여행이 없어요.<br>+ 버튼으로 새 여행을 만들어 보세요.</div>`}
     </div>
   `;
 }
@@ -107,7 +108,7 @@ function tripCardHtml(t) {
   let metaExtra = '';
   if (st === 'past') metaExtra = t.memories && t.memories.length ? ` · 구글포토 ${t.memories.length}` : (savedFood ? ` · 맛집 ${savedFood}곳` : '');
   return `
-    <div class="trip-card ${st === 'upcoming' ? 'upcoming' : ''}" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">
+    <div class="trip-card ${st === 'past' ? 'past' : 'upcoming'}" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">
       <div class="row">
         <div class="name">${esc(t.name)}</div>
         ${rightTag}
@@ -148,8 +149,8 @@ function tripChips(t) {
     <div class="chips">
       <button class="chip ${t.flights.length ? 'filled' : ''}" onclick="go({name:'flights',tripId:'${t.id}'})">항공${t.flights.length ? ' ' + t.flights.length : ''}</button>
       <button class="chip ${t.hotels.length ? 'filled' : ''}" onclick="go({name:'hotels',tripId:'${t.id}'})">숙소${t.hotels.length ? ' ' + t.hotels.length : ''}</button>
-      <button class="chip" onclick="go({name:'checklist',tripId:'${t.id}'})">체크리스트</button>
-      <button class="chip" onclick="alert('가계부는 다음 단계에서 추가됩니다')">가계부</button>
+      <button class="chip" onclick="go({name:'checklist',tripId:'${t.id}'})">체크</button>
+      <button class="chip" onclick="go({name:'memos',tripId:'${t.id}'})">메모</button>
     </div>
   `;
 }
@@ -173,12 +174,15 @@ function fabFor(t, tab) {
   return '';
 }
 
-// 해당 날짜(dateIso)에 뜨는 항공편 (출발 MM.DD 파싱해서 매칭)
+// 해당 날짜(dateIso)에 뜨는 항공편 (출발 날짜로 매칭)
 function flightsForDate(t, dateIso) {
-  const d = new Date(dateIso + 'T00:00:00'), mm = d.getMonth() + 1, dd = d.getDate();
-  return (t.flights || []).filter(f => { const m = (f.dep || '').match(/(\d{1,2})[.\/-](\d{1,2})/); return m && +m[1] === mm && +m[2] === dd; });
+  const d = new Date(dateIso + 'T00:00:00'), y = d.getFullYear(), mm = d.getMonth() + 1, dd = d.getDate();
+  return (t.flights || []).filter(f => {
+    if (f.depDate) { const p = f.depDate.match(/(\d{4})\D(\d{1,2})\D(\d{1,2})/); return p && +p[1] === y && +p[2] === mm && +p[3] === dd; }
+    const m = (f.dep || '').match(/(\d{1,2})[.\/-](\d{1,2})/); return m && +m[1] === mm && +m[2] === dd; // 구 데이터 fallback
+  });
 }
-function flightTime(f) { const m = (f.dep || '').match(/(\d{1,2}:\d{2})/); return m ? m[1] : ''; }
+function flightTime(f) { if (f.depTime) return f.depTime; const m = (f.dep || '').match(/(\d{1,2}:\d{2})/); return m ? m[1] : ''; }
 
 // ---- 일정(plan) ----
 function planView(t) {
@@ -213,7 +217,7 @@ function flightItemHtml(t, f) {
       <div class="body accent">
         <span class="type-emoji">✈️</span>
         <div class="t-name">${esc(f.route)}<span class="t-tag">항공</span></div>
-        <div class="t-sub">${esc(f.airline || '')}${f.arr ? ' · ' + esc(f.dep) + ' → ' + esc(f.arr) : ''}</div>
+        <div class="t-sub">${esc(f.airline || '')}${flightArrStr(f) ? ' · ' + esc(flightDepStr(f)) + ' → ' + esc(flightArrStr(f)) : ''}</div>
       </div>
     </div>
   `;
@@ -229,12 +233,12 @@ function itemHtml(t, di, it, ii, total) {
       <div class="body ${bodyCls}">
         <span class="type-emoji">${TYPE_EMOJI[it.type] || '📍'}</span>
         <div class="t-name">${esc(it.name)}<span class="t-tag">${esc(it.tag || '')}</span></div>
-        <div class="t-sub">
+        ${(it.rank || it.sub || linkTxt) ? `<div class="t-sub">
           ${it.rank ? `<span>맛집 ${it.rank}위</span>` : ''}
           ${it.sub ? `<span>${esc(it.sub)}</span>` : ''}
           ${linkTxt ? `<span>${linkTxt}</span>` : ''}
-          <span>${memberAv(it.by)}</span>
-        </div>
+        </div>` : ''}
+        ${it.photo ? `<img src="${it.photo}" style="width:100%;border-radius:10px;margin-top:8px;display:block;"/>` : ''}
       </div>
     </div>
     ${leg}
@@ -381,16 +385,19 @@ function resizePhoto(file, cb) {
 function pickMoment(tripId, place, day) {
   const t = getTrip(tripId);
   const inp = document.createElement('input');
-  inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment');
+  // capture 미지정 → iOS가 '사진 찍기 / 사진 보관함 / 파일 선택'을 모두 제공. multiple → 여러 장 한번에
+  inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
   inp.onchange = () => {
-    if (!inp.files[0]) return;
-    resizePhoto(inp.files[0], dataUrl => {
-      // day 미지정이면 첫 날(또는 진행중인 오늘)로
-      let d = (typeof day === 'number') ? day : 1;
-      const caption = place || prompt('사진 설명 (선택, 예: 도톤보리 이동 중)') || '';
-      t.moments = t.moments || [];
-      t.moments.push({ id: uid(), photo: dataUrl, place: place || caption, caption, day: d, by: ME || 'mom', ts: Date.now() });
-      persist(); render();
+    const files = Array.from(inp.files || []); if (!files.length) return;
+    const d = (typeof day === 'number') ? day : 1;
+    let done = 0;
+    files.forEach((file, idx) => {
+      resizePhoto(file, dataUrl => {
+        t.moments = t.moments || [];
+        t.moments.push({ id: uid(), photo: dataUrl, place: place || '', caption: place || '', day: d, by: ME || 'mom', ts: Date.now() + idx });
+        done++;
+        if (done === files.length) { persist(); render(); }
+      });
     });
   };
   inp.click();
@@ -418,7 +425,7 @@ function renderFlights(t) {
       ${t.flights.map(f => `
         <div class="card">
           <div class="c-title">${esc(f.route)}</div>
-          <div class="c-meta">${esc(f.airline)} · ${esc(f.dep)} → ${esc(f.arr)}</div>
+          <div class="c-meta">${esc(f.airline)} · ${esc(flightDepStr(f))} → ${esc(flightArrStr(f))}</div>
           ${f.code ? `<div class="c-meta">예약번호 ${esc(f.code)}</div>` : ''}
           <div class="pill-row">
             ${f.bookingUrl ? `<span class="pill" onclick="openUrl('${esc(f.bookingUrl)}')">예약 링크</span>` : ''}
@@ -468,6 +475,31 @@ function renderChecklist(t) {
           <span class="linkbtn" onclick="sheetCheck('${t.id}','${c.id}')">수정</span>
         </div>`).join('')}
       <button class="add-dashed" style="margin-top:16px;" onclick="sheetCheck('${t.id}')">＋ 항목 추가</button>
+    </div>
+  `;
+}
+
+// ---- 메모 (전체 모아보기) ----
+function renderMemos(t) {
+  const memos = [];
+  t.days.forEach((d, di) => d.items.forEach(it => { if (it.type === 'memo') memos.push({ di, date: d.date, it }); }));
+  app.innerHTML = `
+    <div class="topbar"><button class="back" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">‹</button><h1>메모</h1></div>
+    <div class="page">
+      ${memos.length ? memos.map(m => `
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="c-meta" style="margin:0;">${fmtDate(m.date)} · ${memberLabel(m.it.by)}</div>
+            <div style="display:flex;gap:12px;">
+              <span class="linkbtn" onclick="sheetItem('${t.id}',${m.di},null,'${m.it.id}')">수정</span>
+              <span class="linkbtn" style="color:var(--text-3)" onclick="delItem('${t.id}',${m.di},'${m.it.id}')">삭제</span>
+            </div>
+          </div>
+          <div style="font-size:16px;margin-top:8px;white-space:pre-wrap;">${esc(m.it.name)}</div>
+          ${m.it.photo ? `<img src="${m.it.photo}" style="width:100%;border-radius:12px;margin-top:10px;"/>` : ''}
+        </div>
+      `).join('') : `<div class="empty"><span class="ico">📝</span>메모가 없어요.<br>아래에서 추가하거나, 일정에서 '＋ 메모 추가'로 적어보세요.</div>`}
+      <button class="add-dashed" onclick="sheetItem('${t.id}', 0, 'memo')">＋ 메모 추가</button>
     </div>
   `;
 }
@@ -577,11 +609,18 @@ function sheetItem(tripId, di, kind, itemId) {
   const isMemo = it ? it.type === 'memo' : kind === 'memo';
   const typeOpt = (v, l) => `<option value="${v}" ${it && it.type === v ? 'selected' : ''}>${l}</option>`;
   const link0 = it && it.links && it.links[0] ? it.links[0].url : '';
+  _attachPhoto = it && it.photo ? it.photo : null; // 메모 사진 임시보관
   openSheet(`
     <h2>${it ? (isMemo ? '메모 수정' : '장소 수정') : (isMemo ? '메모 추가' : '장소 추가')}</h2>
-    <label class="field-label">${isMemo ? '메모 내용' : '장소 이름'}</label>
-    <input id="ai-name" placeholder="${isMemo ? '예: 우산 챙기기' : '예: 시부야 스카이'}" value="${it ? esc(it.name) : ''}" />
-    ${!isMemo ? `
+    ${isMemo ? `
+    <label class="field-label">메모 내용</label>
+    <textarea id="ai-name" placeholder="예: 우산 챙기기 / 현우 알레르기 주의">${it ? esc(it.name) : ''}</textarea>
+    <label class="field-label">사진 (선택)</label>
+    <div id="memo-photo">${_attachPhoto ? `<img src="${_attachPhoto}" style="width:100%;border-radius:12px;margin-bottom:8px;"/>` : ''}</div>
+    <button class="add-dashed" onclick="attachMemoPhoto()">📷 사진 첨부 (촬영·앨범)</button>
+    ` : `
+    <label class="field-label">장소 이름</label>
+    <input id="ai-name" placeholder="예: 시부야 스카이" value="${it ? esc(it.name) : ''}" />
     <label class="field-label">종류</label>
     <select id="ai-type">${typeOpt('sight', '관광')}${typeOpt('food', '맛집')}${typeOpt('move', '이동')}${typeOpt('shopping', '쇼핑')}${typeOpt('activity', '액티비티')}${typeOpt('hotel', '숙소')}</select>
     <label class="field-label">시간</label>
@@ -589,12 +628,25 @@ function sheetItem(tripId, di, kind, itemId) {
     <label class="field-label">메모 (선택)</label>
     <input id="ai-sub" placeholder="예: 예약 필요" value="${it ? esc(it.sub || '') : ''}" />
     <label class="field-label">참고 링크 (유튜브/인스타, 선택)</label>
-    <input id="ai-link" placeholder="https://..." value="${esc(link0)}" />` : ''}
+    <input id="ai-link" placeholder="https://..." value="${esc(link0)}" />`}
     <label class="field-label">올린 사람</label>
     ${whoPicker('ai-who', it ? it.by : ME)}
     <button class="btn-primary" onclick="saveItem('${tripId}',${di},${isMemo},${it ? `'${itemId}'` : 'null'})">${it ? '저장' : '추가'}</button>
     <button class="btn-ghost" onclick="closeSheet()">취소</button>
   `);
+}
+function attachMemoPhoto() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = () => {
+    if (!inp.files[0]) return;
+    resizePhoto(inp.files[0], durl => {
+      _attachPhoto = durl;
+      const box = document.getElementById('memo-photo');
+      if (box) box.innerHTML = `<img src="${durl}" style="width:100%;border-radius:12px;margin-bottom:8px;"/>`;
+    });
+  };
+  inp.click();
 }
 function saveItem(tripId, di, isMemo, itemId) {
   const t = getTrip(tripId);
@@ -603,11 +655,11 @@ function saveItem(tripId, di, isMemo, itemId) {
   const buildLinks = () => { const link = val('ai-link'); return link ? [{ kind: link.includes('insta') ? 'instagram' : 'youtube', url: link }] : []; };
   if (itemId) {
     const it = t.days[di].items.find(x => x.id === itemId);
-    if (isMemo) Object.assign(it, { name, by });
+    if (isMemo) Object.assign(it, { name, by, photo: _attachPhoto });
     else { const type = val('ai-type') || 'sight'; Object.assign(it, { time: val('ai-time'), type, name, tag: CAT[type] ? CAT[type].label : '관광', sub: val('ai-sub'), by, links: buildLinks() }); }
   } else {
     let item;
-    if (isMemo) item = { id: uid(), time: '', type: 'memo', name, tag: '메모', sub: '', by };
+    if (isMemo) item = { id: uid(), time: '', type: 'memo', name, tag: '메모', sub: '', by, photo: _attachPhoto };
     else { const type = val('ai-type') || 'sight'; item = { id: uid(), time: val('ai-time'), type, name, tag: CAT[type] ? CAT[type].label : '관광', sub: val('ai-sub'), by, mapUrl: '', links: buildLinks() }; }
     t.days[di].items.push(item);
   }
@@ -627,7 +679,7 @@ function sheetItemDetail(tripId, di, itemId) {
       ${(it.links || []).map(l => `<span class="pill" onclick="openUrl('${esc(l.url)}')">${l.kind === 'youtube' ? '유튜브' : '인스타'}</span>`).join('')}
     </div>
     <button class="btn-primary" onclick="closeSheet();sheetItem('${tripId}',${di},null,'${itemId}')">수정</button>
-    <button class="btn-primary" style="background:var(--surface-2);color:var(--text);" onclick="closeSheet();pickMoment('${tripId}','${esc(it.name)}',${di + 1})">이 장소 사진 찍기</button>
+    <button class="btn-primary" style="background:var(--surface-2);color:var(--text);" onclick="closeSheet();pickMoment('${tripId}','${esc(it.name)}',${di + 1})">이 장소 사진 추가 (촬영·앨범)</button>
     <button class="btn-primary" style="background:#e24b4a;" onclick="delItem('${tripId}',${di},'${itemId}')">일정에서 삭제</button>
     <button class="btn-ghost" onclick="closeSheet()">닫기</button>
   `);
@@ -723,10 +775,14 @@ function sheetFlight(tripId, fid) {
     <input id="fl-route" placeholder="예: 서울(ICN) → 도쿄(NRT)" value="${f ? esc(f.route) : ''}" />
     <label class="field-label">항공편명</label>
     <input id="fl-air" placeholder="예: OZ102" value="${f ? esc(f.airline) : ''}" />
-    <label class="field-label">출발</label>
-    <input id="fl-dep" placeholder="예: 09.24 18:30" value="${f ? esc(f.dep) : ''}" />
-    <label class="field-label">도착</label>
-    <input id="fl-arr" placeholder="예: 09.24 21:00" value="${f ? esc(f.arr) : ''}" />
+    <label class="field-label">출발 날짜 (예: 260924 → 2026.09.24)</label>
+    <input id="fl-dep-date" inputmode="numeric" placeholder="260924" value="${f ? esc(f.depDate || '') : ''}" />
+    <label class="field-label">출발 시간</label>
+    <input id="fl-dep-time" type="time" value="${f ? esc(f.depTime || '') : ''}" />
+    <label class="field-label">도착 날짜 (예: 260924 → 2026.09.24)</label>
+    <input id="fl-arr-date" inputmode="numeric" placeholder="260924" value="${f ? esc(f.arrDate || '') : ''}" />
+    <label class="field-label">도착 시간</label>
+    <input id="fl-arr-time" type="time" value="${f ? esc(f.arrTime || '') : ''}" />
     <label class="field-label">예약번호 (선택)</label>
     <input id="fl-code" placeholder="예: ABC123" value="${f ? esc(f.code || '') : ''}" />
     <label class="field-label">예약 링크 (선택)</label>
@@ -737,11 +793,19 @@ function sheetFlight(tripId, fid) {
 }
 function saveFlight(tripId, fid) {
   const t = getTrip(tripId); const route2 = val('fl-route'); if (!route2) { alert('구간을 입력해 주세요.'); return; }
-  const data = { route: route2, airline: val('fl-air'), dep: val('fl-dep'), arr: val('fl-arr'), code: val('fl-code'), bookingUrl: val('fl-url') };
+  const data = {
+    route: route2, airline: val('fl-air'),
+    depDate: fmtYmd(val('fl-dep-date')), depTime: val('fl-dep-time'),
+    arrDate: fmtYmd(val('fl-arr-date')), arrTime: val('fl-arr-time'),
+    code: val('fl-code'), bookingUrl: val('fl-url'),
+  };
   if (fid) Object.assign(t.flights.find(x => x.id === fid), data);
   else t.flights.push({ id: uid(), ...data });
   persist(); closeSheet(); render();
 }
+// 항공 표시 문자열 (신규 필드 우선, 구 데이터 fallback)
+function flightDepStr(f) { return f.depDate ? `${f.depDate} ${f.depTime || ''}`.trim() : (f.dep || ''); }
+function flightArrStr(f) { return f.arrDate ? `${f.arrDate} ${f.arrTime || ''}`.trim() : (f.arr || ''); }
 function delFlight(tripId, fid) { const t = getTrip(tripId); t.flights = t.flights.filter(x => x.id !== fid); persist(); render(); }
 
 // 숙소 추가/수정
