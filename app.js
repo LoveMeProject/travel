@@ -492,7 +492,7 @@ function createTrip() {
   if (!start || !end || end < start) { alert('날짜를 확인해 주세요.'); return; }
   const days = [];
   let d = new Date(start + 'T00:00:00'), de = new Date(end + 'T00:00:00');
-  while (d <= de) { days.push({ date: d.toISOString().slice(0, 10), weather: '', items: [] }); d.setDate(d.getDate() + 1); }
+  while (d <= de) { days.push({ date: isoLocal(d), weather: '', items: [] }); d.setDate(d.getDate() + 1); }
   DATA.trips.unshift({ id: uid(), name, dest, start, end, members: ['mom', 'dad', 'son'], flights: [], hotels: [], days, saved: [], checklist: [], memories: [] });
   persist(); closeSheet(); go({ name: 'home', homeTab: 'upcoming' });
 }
@@ -527,7 +527,7 @@ function saveTrip(tripId) {
     const newDays = [];
     let d = new Date(start + 'T00:00:00'), de = new Date(end + 'T00:00:00');
     while (d <= de) {
-      const iso = d.toISOString().slice(0, 10);
+      const iso = isoLocal(d);
       newDays.push(oldByDate[iso] || { date: iso, weather: '', items: [] });
       d.setDate(d.getDate() + 1);
     }
