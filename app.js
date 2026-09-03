@@ -232,19 +232,69 @@ function guessType(s) {
   if (/호텔|숙소|체크인|체크아웃|리조트|게스트하우스|모텔|료칸|펜션/.test(s)) return 'hotel';
   return 'sight';
 }
+// GPT에게 붙여넣을 형식 프롬프트
+const DRAFT_PROMPT = `아래 여행 일정을 다음 형식으로만 다시 정리해줘. 설명·인사말 없이 아래 형식의 줄만 출력해:
+
+DAY 1
+시간 | 종류 | 장소 또는 할 일
+시간 | 종류 | 장소 또는 할 일
+
+DAY 2
+시간 | 종류 | 장소 또는 할 일
+
+규칙:
+- 종류는 반드시 이 중 하나만: 관광, 식사, 이동, 쇼핑, 숙소, 액티비티, 메모
+- 시간을 모르면 시간 자리에 - 만 써줘 (예: - | 관광 | 아사쿠사)
+- 한 줄에 일정 하나. 부가 설명은 빼고 핵심만.
+- 각 줄은 반드시 "시간 | 종류 | 이름" 3칸을 | 로 구분.
+
+[여기에 내 여행 일정을 붙여넣기]`;
+const TYPE_MAP = { '관광': 'sight', '식사': 'food', '맛집': 'food', '음식': 'food', '이동': 'move', '교통': 'move', '쇼핑': 'shopping', '숙소': 'hotel', '호텔': 'hotel', '체크인': 'hotel', '액티비티': 'activity', '체험': 'activity', '메모': 'memo', '기타': 'sight' };
+
+// 형식(시간 | 종류 | 이름) 파싱. | 없으면 기존 휴리스틱으로 폴백.
+function parseStructured(text) {
+  const lines = text.split(/\r?\n/);
+  let day = 1; const out = []; let sawPipe = false;
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const dm = line.match(/^day\s*(\d+)/i) || line.match(/^(\d+)\s*일\s*[차째]/);
+    if (dm) { day = +dm[1] || day; continue; }
+    if (line.includes('|')) {
+      sawPipe = true;
+      const parts = line.split('|').map(s => s.trim());
+      let time = '', typeKo = '', name = '';
+      if (parts.length >= 3) { time = parts[0]; typeKo = parts[1]; name = parts.slice(2).join(' | '); }
+      else if (parts.length === 2) { typeKo = parts[0]; name = parts[1]; }
+      if (time === '-' || time === '') time = '';
+      const tm = time.match(/(\d{1,2}):(\d{2})/); time = tm ? `${String(+tm[1]).padStart(2, '0')}:${tm[2]}` : '';
+      const type = TYPE_MAP[typeKo] || guessType(typeKo + ' ' + name);
+      if (name) out.push({ day, time, name, type });
+    }
+  }
+  if (!sawPipe) return parseDraftLines(text).map(p => ({ ...p, type: guessType(p.name) })); // 형식 아님 → 폴백
+  return out;
+}
+function copyDraftPrompt() {
+  const ta = document.getElementById('draft-prompt');
+  if (navigator.clipboard) { navigator.clipboard.writeText(DRAFT_PROMPT).then(() => alert('프롬프트를 복사했어요. GPT에 붙여넣고, 그 아래에 여행 일정을 붙여 실행하세요.')); }
+  else if (ta) { ta.select(); document.execCommand('copy'); alert('프롬프트를 복사했어요.'); }
+}
 function sheetDraft(tripId) {
   openSheet(`
     <h2>여행 초안 붙여넣기</h2>
-    <div class="c-meta" style="margin-bottom:10px;">GPT 등에서 짠 일정을 그대로 붙여넣고 '정리하기'를 누르면, Day별 일정으로 자동 정리해요. 이후 각 항목을 눌러 직접 수정하면 됩니다.</div>
-    <textarea id="draft-text" style="min-height:240px;" placeholder="예)
-Day 1
-09:00 인천공항 출발
-12:00 이치란 라멘 점심
-15:00 시부야 스카이
+    <div class="c-meta" style="margin-bottom:8px;"><b>1단계.</b> 아래 프롬프트를 복사해 GPT에 붙여넣고, 그 아래에 여행 일정을 붙여 실행하세요.</div>
+    <textarea id="draft-prompt" readonly style="min-height:120px;font-size:13px;color:var(--text-2);">${esc(DRAFT_PROMPT)}</textarea>
+    <button class="add-dashed" style="margin-top:6px;" onclick="copyDraftPrompt()">📋 프롬프트 복사</button>
+    <div class="c-meta" style="margin:16px 0 8px;"><b>2단계.</b> GPT가 정리해준 결과를 아래에 붙여넣고 '정리하기'를 누르세요.</div>
+    <textarea id="draft-text" style="min-height:180px;" placeholder="예)
+DAY 1
+09:00 | 이동 | 인천공항 출발
+12:30 | 식사 | 이치란 라멘
+15:00 | 관광 | 시부야 스카이
 
-Day 2
-10:00 아사쿠사
-13:00 스시 오마카세"></textarea>
+DAY 2
+- | 관광 | 아사쿠사"></textarea>
     <button class="btn-primary" onclick="applyDraft('${tripId}')">정리하기</button>
     <button class="btn-ghost" onclick="closeSheet()">취소</button>
   `);
@@ -252,11 +302,11 @@ Day 2
 function applyDraft(tripId) {
   const t = getTrip(tripId); const text = val('draft-text');
   if (!text) { alert('붙여넣은 내용이 없어요.'); return; }
-  const parsed = parseDraftLines(text);
-  if (!parsed.length) { alert('일정으로 인식할 내용을 못 찾았어요. Day 구분과 항목을 넣어 다시 시도해 주세요.'); return; }
+  const parsed = parseStructured(text);
+  if (!parsed.length) { alert('일정으로 인식할 내용을 못 찾았어요. 1단계 프롬프트로 GPT에서 정리한 결과를 붙여넣어 주세요.'); return; }
   parsed.forEach(p => {
     const di = Math.min(Math.max(p.day - 1, 0), t.days.length - 1);
-    const type = guessType(p.name);
+    const type = p.type || 'sight';
     t.days[di].items.push({ id: uid(), time: p.time, type, name: p.name, tag: CAT[type] ? CAT[type].label : '', sub: '', by: ME || 'mom', mapUrl: '', links: [] });
   });
   persist(); closeSheet(); go({ name: 'trip', tripId: tripId, tab: 'plan' });
