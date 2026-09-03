@@ -24,11 +24,8 @@ function cloudSync() {
     }
   });
 }
-function cloudDeleteTrip(id) {
-  if (!window.SB) return;
-  delete _pushCache[id];
-  SB.from('trips').delete().eq('id', id).then(r => { if (r.error) console.error('delete', r.error); });
-}
+// (사용 안 함) 앱은 어떤 경우에도 클라우드에서 진짜 삭제하지 않습니다. 삭제는 전부 '숨김'.
+function cloudDeleteTrip(id) { /* no-op: 안전을 위해 실제 삭제 비활성화 */ }
 function seedCache() { _pushCache = {}; DATA.trips.forEach(t => { _pushCache[t.id] = JSON.stringify(t); }); }
 
 // ---- 사용자(나는 누구) ----
@@ -46,6 +43,8 @@ function renderIdentity() {
     </div>`;
 }
 function getTrip(id) { return DATA.trips.find(t => t.id === id); }
+function activeTrips() { return DATA.trips.filter(t => !t.deleted); }
+function notDel(arr) { return (arr || []).filter(x => !x.del); }
 function memberAv(key) { const m = MEMBERS[key]; return m ? `<span class="av ${m.cls}">${m.label}</span>` : ''; }
 function memberLabel(key) { return MEMBERS[key] ? MEMBERS[key].label : key; }
 function openMap(q) { if (!q) return; window.open('https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q), '_blank'); }
@@ -64,6 +63,7 @@ function nameFromMapUrl(url) {
 function render() {
   if (!ME) return renderIdentity();
   if (route.name === 'home') return renderHome();
+  if (route.name === 'trash') return renderTrash();
   const t = getTrip(route.tripId);
   if (!t) { route = { name: 'home' }; return renderHome(); }
   if (route.name === 'trip') return renderTrip(t);
@@ -71,17 +71,19 @@ function render() {
   if (route.name === 'hotels') return renderHotels(t);
   if (route.name === 'checklist') return renderChecklist(t);
   if (route.name === 'memos') return renderMemos(t);
+  if (route.name === 'triptrash') return renderTripTrash(t);
 }
 
 // ---------------- HOME ----------------
 function renderHome() {
-  // 탭 없이 한 리스트: 진행중 → 예정(가까운 순) → 지난(최근 순)
+  // 탭 없이 한 리스트: 진행중 → 예정(가까운 순) → 지난(최근 순). 숨김 여행 제외.
   const rank = { ongoing: 0, upcoming: 1, past: 2 };
-  const list = DATA.trips.slice().sort((a, b) => {
+  const list = activeTrips().sort((a, b) => {
     const sa = tripStatus(a), sb = tripStatus(b);
     if (rank[sa] !== rank[sb]) return rank[sa] - rank[sb];
     return sa === 'past' ? b.start.localeCompare(a.start) : a.start.localeCompare(b.start);
   });
+  const trashCount = DATA.trips.filter(t => t.deleted).length;
 
   app.innerHTML = `
     <div class="home-header">
@@ -93,6 +95,10 @@ function renderHome() {
     </div>
     <div class="page" style="padding-top:14px;">
       ${list.length ? list.map(tripCardHtml).join('') : `<div class="empty"><span class="ico">🧳</span>아직 여행이 없어요.<br>+ 버튼으로 새 여행을 만들어 보세요.</div>`}
+      <div style="display:flex;justify-content:center;gap:18px;margin-top:20px;">
+        <span class="linkbtn" style="color:var(--text-3)" onclick="go({name:'trash'})">🗑 휴지통${trashCount ? ' ' + trashCount : ''}</span>
+        <span class="linkbtn" style="color:var(--text-3)" onclick="exportBackup()">⬇ 백업 내보내기</span>
+      </div>
     </div>
   `;
 }
@@ -116,6 +122,145 @@ function tripCardHtml(t) {
       <div class="meta">${fmtRange(t.start, t.end)} · ${nights(t.start, t.end)} · ${t.members.length}명${metaExtra}</div>
     </div>
   `;
+}
+
+// ---- 휴지통 (삭제한 여행 복원) ----
+function renderTrash() {
+  const deleted = DATA.trips.filter(t => t.deleted);
+  app.innerHTML = `
+    <div class="topbar"><button class="back" onclick="go({name:'home'})">‹</button><h1>🗑 휴지통</h1></div>
+    <div class="page">
+      <div class="c-meta" style="margin-bottom:12px;">삭제한 여행은 지워지지 않고 여기 보관돼요. 언제든 복원할 수 있어요.</div>
+      ${deleted.length ? deleted.map(t => `
+        <div class="card">
+          <div class="c-title">${esc(t.name)}</div>
+          <div class="c-meta">${fmtRange(t.start, t.end)} · ${t.members.length}명</div>
+          <div class="pill-row"><span class="pill" onclick="restoreTrip('${t.id}')">↩ 복원</span></div>
+        </div>`).join('') : `<div class="empty"><span class="ico">🗑</span>휴지통이 비어 있어요.</div>`}
+    </div>
+  `;
+}
+
+// ---- 여행별 휴지통 (삭제한 항목 복원) ----
+function renderTripTrash(t) {
+  const groups = [
+    ['days', '일정', (t.days || []).flatMap((d, di) => (d.items || []).filter(x => x.del).map(x => ({ x, label: x.name, restore: `restoreSub('${t.id}','item',${di},'${x.id}')` })))],
+    ['flights', '항공', notDelInv(t.flights).map(x => ({ x, label: x.route, restore: `restoreSub('${t.id}','flight',null,'${x.id}')` }))],
+    ['hotels', '숙소', notDelInv(t.hotels).map(x => ({ x, label: x.name, restore: `restoreSub('${t.id}','hotel',null,'${x.id}')` }))],
+    ['saved', '저장함', notDelInv(t.saved).map(x => ({ x, label: x.name, restore: `restoreSub('${t.id}','saved',null,'${x.id}')` }))],
+    ['checklist', '체크', notDelInv(t.checklist).map(x => ({ x, label: x.label, restore: `restoreSub('${t.id}','check',null,'${x.id}')` }))],
+    ['memories', '구글포토', notDelInv(t.memories).map(x => ({ x, label: x.title, restore: `restoreSub('${t.id}','memory',null,'${x.id}')` }))],
+    ['moments', '여행순간', notDelInv(t.moments).map(x => ({ x, label: x.place || '사진', restore: `restoreSub('${t.id}','moment',null,'${x.id}')` }))],
+  ].filter(g => g[2].length);
+  app.innerHTML = `
+    <div class="topbar"><button class="back" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">‹</button><h1>🗑 삭제한 항목</h1></div>
+    <div class="page">
+      ${groups.length ? groups.map(g => `
+        <div class="section-label">${g[1]}</div>
+        ${g[2].map(o => `
+          <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div class="c-title" style="font-size:15px;">${esc(o.label || '(제목없음)')}</div>
+            <span class="pill" onclick="${o.restore}">↩ 복원</span>
+          </div></div>`).join('')}
+      `).join('') : `<div class="empty"><span class="ico">🗑</span>삭제한 항목이 없어요.</div>`}
+    </div>
+  `;
+}
+function notDelInv(arr) { return (arr || []).filter(x => x.del); }
+function restoreSub(tripId, kind, di, id) {
+  const t = getTrip(tripId); let arr;
+  if (kind === 'item') arr = t.days[di].items;
+  else if (kind === 'flight') arr = t.flights;
+  else if (kind === 'hotel') arr = t.hotels;
+  else if (kind === 'saved') arr = t.saved;
+  else if (kind === 'check') arr = t.checklist;
+  else if (kind === 'memory') arr = t.memories;
+  else if (kind === 'moment') arr = t.moments;
+  const o = (arr || []).find(x => x.id === id); if (o) delete o.del;
+  persist(); render();
+}
+
+// ---- 백업 내보내기 (전체 데이터를 파일/클립보드로) ----
+function exportBackup() {
+  const json = JSON.stringify(DATA, null, 2);
+  try {
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `family-travel-backup-${isoLocal(new Date())}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    if (navigator.clipboard) { navigator.clipboard.writeText(json); alert('백업을 클립보드에 복사했어요. 메모앱 등에 붙여넣어 보관하세요.'); }
+    else alert('백업 내보내기에 실패했어요.');
+  }
+}
+
+// ---- 초안 텍스트 → 일정 자동정리 ----
+function parseDraftLines(text) {
+  const lines = text.split(/\r?\n/);
+  let day = 1; const out = [];
+  for (let raw of lines) {
+    let line = raw.trim();
+    if (!line) continue;
+    // Day 헤더 감지 (day 1 / 1일차 / 1일째 / 첫째날 등)
+    let m = line.match(/(?:day|데이)\s*(\d+)/i) || line.match(/(\d+)\s*일\s*[차째]/) || line.match(/(\d+)\s*일\s*[-:]/);
+    if (m && line.replace(/\s/g, '').length <= 14) { day = +m[1] || day; continue; }
+    // 글머리 기호/번호 제거
+    line = line.replace(/^[-*•·▪◦●]\s*/, '').replace(/^\d+[.)]\s*/, '').trim();
+    if (!line) continue;
+    // 시간 추출
+    let time = '';
+    let tm = line.match(/(\d{1,2}):(\d{2})/);
+    if (tm) { time = `${String(+tm[1]).padStart(2, '0')}:${tm[2]}`; }
+    else {
+      let km = line.match(/(오전|오후)?\s*(\d{1,2})\s*시\s*(\d{1,2})?\s*분?/);
+      if (km) { let h = +km[2]; if (km[1] === '오후' && h < 12) h += 12; if (km[1] === '오전' && h === 12) h = 0; time = `${String(h).padStart(2, '0')}:${String(+(km[3] || 0)).padStart(2, '0')}`; }
+    }
+    let name = line;
+    if (tm) name = name.replace(tm[0], '');
+    name = name.replace(/^(오전|오후)?\s*\d{1,2}\s*시\s*(\d{1,2}\s*분?)?/, '').replace(/^[-–~:()\s]+/, '').trim();
+    if (!name) name = line;
+    out.push({ day, time, name });
+  }
+  return out;
+}
+function guessType(s) {
+  if (/맛집|점심|저녁|아침|식당|레스토랑|카페|브런치|디너|런치|먹거리|맛/.test(s)) return 'food';
+  if (/이동|공항|기차|신칸센|버스|지하철|택시|렌트|렌터카|출발|도착|드라이브|KTX|비행/.test(s)) return 'move';
+  if (/쇼핑|마트|백화점|아울렛|면세|기념품/.test(s)) return 'shopping';
+  if (/호텔|숙소|체크인|체크아웃|리조트|게스트하우스|모텔|료칸|펜션/.test(s)) return 'hotel';
+  return 'sight';
+}
+function sheetDraft(tripId) {
+  openSheet(`
+    <h2>여행 초안 붙여넣기</h2>
+    <div class="c-meta" style="margin-bottom:10px;">GPT 등에서 짠 일정을 그대로 붙여넣고 '정리하기'를 누르면, Day별 일정으로 자동 정리해요. 이후 각 항목을 눌러 직접 수정하면 됩니다.</div>
+    <textarea id="draft-text" style="min-height:240px;" placeholder="예)
+Day 1
+09:00 인천공항 출발
+12:00 이치란 라멘 점심
+15:00 시부야 스카이
+
+Day 2
+10:00 아사쿠사
+13:00 스시 오마카세"></textarea>
+    <button class="btn-primary" onclick="applyDraft('${tripId}')">정리하기</button>
+    <button class="btn-ghost" onclick="closeSheet()">취소</button>
+  `);
+}
+function applyDraft(tripId) {
+  const t = getTrip(tripId); const text = val('draft-text');
+  if (!text) { alert('붙여넣은 내용이 없어요.'); return; }
+  const parsed = parseDraftLines(text);
+  if (!parsed.length) { alert('일정으로 인식할 내용을 못 찾았어요. Day 구분과 항목을 넣어 다시 시도해 주세요.'); return; }
+  parsed.forEach(p => {
+    const di = Math.min(Math.max(p.day - 1, 0), t.days.length - 1);
+    const type = guessType(p.name);
+    t.days[di].items.push({ id: uid(), time: p.time, type, name: p.name, tag: CAT[type] ? CAT[type].label : '', sub: '', by: ME || 'mom', mapUrl: '', links: [] });
+  });
+  persist(); closeSheet(); go({ name: 'trip', tripId: tripId, tab: 'plan' });
+  setTimeout(() => alert(parsed.length + '개 항목을 일정에 정리했어요. 각 항목을 눌러 수정할 수 있어요.'), 100);
 }
 
 // ---------------- TRIP DETAIL ----------------
@@ -147,8 +292,8 @@ function tripChips(t) {
       <div class="dates">${fmtRange(t.start, t.end)} · ${t.members.map(m => memberLabel(m)).join('·')}</div>
     </div>
     <div class="chips">
-      <button class="chip ${t.flights.length ? 'filled' : ''}" onclick="go({name:'flights',tripId:'${t.id}'})">항공${t.flights.length ? ' ' + t.flights.length : ''}</button>
-      <button class="chip ${t.hotels.length ? 'filled' : ''}" onclick="go({name:'hotels',tripId:'${t.id}'})">숙소${t.hotels.length ? ' ' + t.hotels.length : ''}</button>
+      <button class="chip ${notDel(t.flights).length ? 'filled' : ''}" onclick="go({name:'flights',tripId:'${t.id}'})">항공${notDel(t.flights).length ? ' ' + notDel(t.flights).length : ''}</button>
+      <button class="chip ${notDel(t.hotels).length ? 'filled' : ''}" onclick="go({name:'hotels',tripId:'${t.id}'})">숙소${notDel(t.hotels).length ? ' ' + notDel(t.hotels).length : ''}</button>
       <button class="chip" onclick="go({name:'checklist',tripId:'${t.id}'})">체크</button>
       <button class="chip" onclick="go({name:'memos',tripId:'${t.id}'})">메모</button>
     </div>
@@ -177,7 +322,7 @@ function fabFor(t, tab) {
 // 해당 날짜(dateIso)에 뜨는 항공편 (출발 날짜로 매칭)
 function flightsForDate(t, dateIso) {
   const d = new Date(dateIso + 'T00:00:00'), y = d.getFullYear(), mm = d.getMonth() + 1, dd = d.getDate();
-  return (t.flights || []).filter(f => {
+  return notDel(t.flights).filter(f => {
     if (f.depDate) { const p = f.depDate.match(/(\d{4})\D(\d{1,2})\D(\d{1,2})/); return p && +p[1] === y && +p[2] === mm && +p[3] === dd; }
     const m = (f.dep || '').match(/(\d{1,2})[.\/-](\d{1,2})/); return m && +m[1] === mm && +m[2] === dd; // 구 데이터 fallback
   });
@@ -186,10 +331,11 @@ function flightTime(f) { if (f.depTime) return f.depTime; const m = (f.dep || ''
 
 // ---- 일정(plan) ----
 function planView(t) {
-  return t.days.map((d, di) => {
+  const draftBtn = `<button class="add-dashed" style="margin-bottom:18px;border-color:var(--accent);color:var(--accent);" onclick="sheetDraft('${t.id}')">📋 초안 텍스트로 일정 채우기</button>`;
+  return draftBtn + t.days.map((d, di) => {
     // 일반 아이템 + 항공편(자동 이동 표시)을 시간순으로 합치기
     const rows = [
-      ...d.items.map(it => ({ kind: 'item', time: it.time || '', it })),
+      ...notDel(d.items).map(it => ({ kind: 'item', time: it.time || '', it })),
       ...flightsForDate(t, d.date).map(f => ({ kind: 'flight', time: flightTime(f), f })),
     ].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
     return `
@@ -248,8 +394,8 @@ function itemHtml(t, di, it, ii, total) {
 // ---- 지도(map) — 링크 방식 ----
 function mapView(t) {
   const allPlaces = [];
-  t.days.forEach((d, di) => d.items.forEach(it => { if (it.mapUrl || it.type === 'food' || it.type === 'sight') allPlaces.push({ ...it, day: di + 1 }); }));
-  (t.saved || []).forEach(s => { if (s.cat === 'food' || s.cat === 'sight') allPlaces.push({ name: s.name, type: s.cat, tag: CAT[s.cat].label, day: null, saved: true }); });
+  t.days.forEach((d, di) => notDel(d.items).forEach(it => { if (it.mapUrl || it.type === 'food' || it.type === 'sight') allPlaces.push({ ...it, day: di + 1 }); }));
+  notDel(t.saved).forEach(s => { if (s.cat === 'food' || s.cat === 'sight') allPlaces.push({ name: s.name, type: s.cat, tag: CAT[s.cat].label, day: null, saved: true }); });
 
   return `
     <div class="card" style="background:var(--accent-bg);border:none;">
@@ -269,7 +415,7 @@ function mapView(t) {
 // ---- 저장함(saved) ----
 function savedView(t) {
   const filter = route.savedFilter || 'all';
-  const saved = t.saved || [];
+  const saved = notDel(t.saved);
   const filtered = filter === 'all' ? saved : saved.filter(s => s.cat === filter);
   const food = filtered.filter(s => s.cat === 'food').sort((a, b) => (a.rank || 99) - (b.rank || 99));
   const others = filtered.filter(s => s.cat !== 'food');
@@ -319,8 +465,8 @@ function savedCardHtml(t, s) {
 
 // ---- 추억(memory) = 여행 순간 모자이크 + 구글포토 링크 ----
 function memoryView(t) {
-  const moments = (t.moments || []).slice().sort((a, b) => (a.day - b.day) || (a.ts - b.ts));
-  const mems = t.memories || [];
+  const moments = notDel(t.moments).slice().sort((a, b) => (a.day - b.day) || (a.ts - b.ts));
+  const mems = notDel(t.memories);
   const cols = route.mosaicCols || 3;
 
   // 퍼즐처럼: 채워진 사진 + 마지막 '＋' 타일 + 남은 칸을 빈 조각으로
@@ -414,7 +560,7 @@ function viewMoment(tripId, mid) {
   `);
 }
 function delMoment(tripId, mid) {
-  const t = getTrip(tripId); t.moments = (t.moments || []).filter(x => x.id !== mid); persist(); closeSheet(); render();
+  const t = getTrip(tripId); const m = (t.moments || []).find(x => x.id === mid); if (m) m.del = true; persist(); closeSheet(); render();
 }
 
 // ---------------- 항공 ----------------
@@ -422,7 +568,7 @@ function renderFlights(t) {
   app.innerHTML = `
     <div class="topbar"><button class="back" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">‹</button><h1>항공</h1></div>
     <div class="page">
-      ${t.flights.map(f => `
+      ${notDel(t.flights).map(f => `
         <div class="card">
           <div class="c-title">${esc(f.route)}</div>
           <div class="c-meta">${esc(f.airline)} · ${esc(flightDepStr(f))} → ${esc(flightArrStr(f))}</div>
@@ -443,7 +589,7 @@ function renderHotels(t) {
   app.innerHTML = `
     <div class="topbar"><button class="back" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">‹</button><h1>숙소</h1></div>
     <div class="page">
-      ${t.hotels.map(h => `
+      ${notDel(t.hotels).map(h => `
         <div class="card">
           <div class="c-title">${esc(h.name)}</div>
           ${h.addr ? `<div class="c-meta">${esc(h.addr)}</div>` : ''}
@@ -461,7 +607,7 @@ function renderHotels(t) {
 
 // ---------------- 체크리스트 ----------------
 function renderChecklist(t) {
-  const list = t.checklist || [];
+  const list = notDel(t.checklist);
   const done = list.filter(c => c.done).length;
   app.innerHTML = `
     <div class="topbar"><button class="back" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">‹</button><h1>체크리스트</h1></div>
@@ -482,7 +628,7 @@ function renderChecklist(t) {
 // ---- 메모 (전체 모아보기) ----
 function renderMemos(t) {
   const memos = [];
-  t.days.forEach((d, di) => d.items.forEach(it => { if (it.type === 'memo') memos.push({ di, date: d.date, it }); }));
+  t.days.forEach((d, di) => notDel(d.items).forEach(it => { if (it.type === 'memo') memos.push({ di, date: d.date, it }); }));
   app.innerHTML = `
     <div class="topbar"><button class="back" onclick="go({name:'trip',tripId:'${t.id}',tab:'plan'})">‹</button><h1>메모</h1></div>
     <div class="page">
@@ -571,7 +717,8 @@ function sheetTrip(tripId) {
     <input id="et-end" type="date" value="${t.end}" />
     <div class="c-meta" style="color:var(--text-3);margin-top:10px;">날짜를 바꿔도 기존 일정은 같은 날짜에 그대로 유지됩니다.</div>
     <button class="btn-primary" onclick="saveTrip('${tripId}')">저장</button>
-    <button class="btn-ghost" style="color:#e24b4a;" onclick="delTrip('${tripId}')">이 여행 삭제</button>
+    <button class="btn-ghost" onclick="closeSheet();go({name:'triptrash',tripId:'${tripId}'})">🗑 삭제한 항목 보기·복원</button>
+    <button class="btn-ghost" style="color:#e24b4a;" onclick="delTrip('${tripId}')">이 여행 삭제(휴지통으로)</button>
     <button class="btn-ghost" onclick="closeSheet()">취소</button>
   `);
 }
@@ -596,10 +743,13 @@ function saveTrip(tripId) {
   persist(); closeSheet(); render();
 }
 function delTrip(tripId) {
-  if (!confirm('이 여행을 삭제할까요? 되돌릴 수 없어요.')) return;
-  DATA.trips = DATA.trips.filter(x => x.id !== tripId);
-  cloudDeleteTrip(tripId); // 사용자가 직접 삭제할 때만 클라우드에서 제거
-  persist(); closeSheet(); go({ name: 'home' });
+  if (!confirm('이 여행을 휴지통으로 보낼까요? 휴지통에서 언제든 복원할 수 있어요.')) return;
+  const t = getTrip(tripId); if (t) { t.deleted = true; t.deletedAt = Date.now(); }
+  persist(); closeSheet(); go({ name: 'home' }); // 실제 삭제 아님 — 숨김만
+}
+function restoreTrip(tripId) {
+  const t = DATA.trips.find(x => x.id === tripId); if (t) { delete t.deleted; delete t.deletedAt; }
+  persist(); render();
 }
 
 // 일정 아이템 추가/수정
@@ -685,7 +835,7 @@ function sheetItemDetail(tripId, di, itemId) {
   `);
 }
 function delItem(tripId, di, itemId) {
-  const t = getTrip(tripId); t.days[di].items = t.days[di].items.filter(x => x.id !== itemId);
+  const t = getTrip(tripId); const it = t.days[di].items.find(x => x.id === itemId); if (it) it.del = true;
   persist(); closeSheet(); render();
 }
 
@@ -736,7 +886,7 @@ function cycleRank(tripId, sid) {
   s.rank = ((s.rank || 0) + 1) % 4; persist(); render();
 }
 function delSaved(tripId, sid) {
-  const t = getTrip(tripId); t.saved = t.saved.filter(x => x.id !== sid); persist(); render();
+  const t = getTrip(tripId); const s = t.saved.find(x => x.id === sid); if (s) s.del = true; persist(); render();
 }
 
 // 추억(구글포토 링크) 추가/수정
@@ -763,7 +913,7 @@ function saveMemory(tripId, mid) {
   persist(); closeSheet(); render();
 }
 function delMemory(tripId, mid) {
-  const t = getTrip(tripId); t.memories = t.memories.filter(x => x.id !== mid); persist(); render();
+  const t = getTrip(tripId); const m = t.memories.find(x => x.id === mid); if (m) m.del = true; persist(); render();
 }
 
 // 항공 추가/수정
@@ -806,7 +956,7 @@ function saveFlight(tripId, fid) {
 // 항공 표시 문자열 (신규 필드 우선, 구 데이터 fallback)
 function flightDepStr(f) { return f.depDate ? `${f.depDate} ${f.depTime || ''}`.trim() : (f.dep || ''); }
 function flightArrStr(f) { return f.arrDate ? `${f.arrDate} ${f.arrTime || ''}`.trim() : (f.arr || ''); }
-function delFlight(tripId, fid) { const t = getTrip(tripId); t.flights = t.flights.filter(x => x.id !== fid); persist(); render(); }
+function delFlight(tripId, fid) { const t = getTrip(tripId); const f = t.flights.find(x => x.id === fid); if (f) f.del = true; persist(); render(); }
 
 // 숙소 추가/수정
 function sheetHotel(tripId, hid) {
@@ -839,7 +989,7 @@ function saveHotel(tripId, hid) {
   else t.hotels.push({ id: uid(), ...data });
   persist(); closeSheet(); render();
 }
-function delHotel(tripId, hid) { const t = getTrip(tripId); t.hotels = t.hotels.filter(x => x.id !== hid); persist(); render(); }
+function delHotel(tripId, hid) { const t = getTrip(tripId); const h = t.hotels.find(x => x.id === hid); if (h) h.del = true; persist(); render(); }
 
 // 체크리스트 추가/수정
 function sheetCheck(tripId, cid) {
@@ -863,7 +1013,7 @@ function saveCheck(tripId, cid) {
   persist(); closeSheet(); render();
 }
 function delCheck(tripId, cid) {
-  const t = getTrip(tripId); t.checklist = t.checklist.filter(x => x.id !== cid); persist(); closeSheet(); render();
+  const t = getTrip(tripId); const c = t.checklist.find(x => x.id === cid); if (c) c.del = true; persist(); closeSheet(); render();
 }
 function toggleCheck(tripId, cid) {
   const t = getTrip(tripId); const c = t.checklist.find(x => x.id === cid); if (c) c.done = !c.done;
